@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Image Pusser</title>
+    <link rel="stylesheet" href="style.css">
+    <script type="text/javascript" src="/eel.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        
+        <!-- Левая панель: Логи и Прогресс -->
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="logo-icon">◈</span>
+                <h1>Image Pusser</h1>
+            </div>
+            
+            <button id="btn-start" class="btn primary full-width" onclick="startApp()">Начать парсинг</button>
+
+            <!-- Блок заблокированных доменов -->
+            <div class="domains-section">
+                <div class="section-header" onclick="toggleDomains()">
+                    <span class="section-title">🚫 Блокировка доменов</span>
+                    <span id="domains-toggle-icon" class="toggle-icon">▸</span>
+                </div>
+                <div id="domains-body" class="domains-body" style="display:none">
+                    <div class="domain-input-row">
+                        <input id="domain-input" class="domain-input" type="text"
+                               placeholder="example.com"
+                               onkeydown="if(event.key==='Enter') addDomain()">
+                        <button class="btn-icon" onclick="addDomain()" title="Добавить">+</button>
+                    </div>
+                    <div id="domains-list" class="domains-list"></div>
+                </div>
+            </div>
+
+            <div class="log-section">
+                <div class="log-header">LOG</div>
+                <div id="log-box" class="log-box"></div>
+            </div>
+
+            <div class="progress-section">
+                <div class="progress-labels">
+                    <span>Общий прогресс</span>
+                    <span id="prog-total-text">0%</span>
+                </div>
+                <div class="progress-bar"><div id="prog-total-fill" class="fill"></div></div>
+            </div>
+        </aside>
+
+        <!-- Правая панель: Сетка и Навигация -->
+        <main class="content">
+            
+            <!-- Инфо-бар страницы -->
+            <header class="top-bar">
+                <div class="page-info">
+                    <h2 id="page-title">Ожидание запуска...</h2>
+                    <span id="page-stats" class="stats-badge">0 фото</span>
+                </div>
+                
+                <div class="folder-progress">
+                    <span id="prog-folder-text"></span>
+                    <div class="progress-bar small"><div id="prog-folder-fill" class="fill"></div></div>
+                </div>
+            </header>
+
+            <!-- Сетка с картинками -->
+            <div id="grid-container" class="grid">
+                <!-- Карточки генерируются в JS -->
+            </div>
+
+            <!-- Нижняя панель: Управление -->
+            <footer class="bottom-bar">
+                <div class="nav-controls">
+                    <button id="btn-prev" class="btn secondary" onclick="changePage(-1)" disabled>◀ Назад</button>
+                    <span id="nav-label" class="nav-label">—</span>
+                    <button id="btn-next" class="btn secondary" onclick="changePage(1)" disabled>Вперёд ▶</button>
+                </div>
+                
+                <button id="btn-apply" class="btn accent" onclick="applyChanges()" disabled>
+                    ✦ Применить (Удалить + Боке)
+                </button>
+            </footer>
+
+        </main>
+    </div>
+
+    <!-- Модальное окно для превью -->
+    <div id="preview-modal" class="modal" onclick="closePreview()">
+        <img id="preview-img" src="" alt="Preview">
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
