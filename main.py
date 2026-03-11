@@ -2,12 +2,14 @@ import os
 import warnings
 import urllib.parse
 import requests
+from requests.exceptions import RequestException
 import random
 import string
 import re
 import threading
 import queue as _queue
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from PIL import Image, ImageFile
 import cv2
 import numpy as np
@@ -23,6 +25,8 @@ THREADS      = 5
 MIN_WIDTH    = 800
 MIN_HEIGHT   = 500
 DHASH_HAMMING_THRESHOLD = 5
+MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+CHUNK_SIZE = 8192
 
 # ─── Настройки OCR-фильтра ────────────────────────────────────────────────────
 OCR_ENABLED          = True
@@ -43,6 +47,7 @@ NEGATIVE_TAGS = [
 pages_data     = []
 lines          = []
 BLOCKED_DOMAINS = []
+pages_lock     = threading.Lock()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -94,8 +99,14 @@ def get_ocr_reader():
                     import easyocr
                     _ocr_reader = easyocr.Reader(['en', 'ru'], gpu=True, verbose=False)
                 except Exception as e:
-                    print(f"EasyOCR недоступен: {e}")
-                    _ocr_reader = False
+                    print(f"EasyOCR GPU недоступен: {e}")
+                    try:
+                        import easyocr
+                        _ocr_reader = easyocr.Reader(['en', 'ru'], gpu=False, verbose=False)
+                        print("EasyOCR запущен в CPU-режиме")
+                    except Exception as e_cpu:
+                        print(f"EasyOCR недоступен: {e_cpu}")
+                        _ocr_reader = False
     return _ocr_reader if _ocr_reader else None
 
 def _ocr_preprocess(img_bgr):
@@ -165,7 +176,8 @@ def sharpness(path):
     try:
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         return float(cv2.Laplacian(img, cv2.CV_64F).var()) if img is not None else 0.0
-    except: return 0.0
+    except Exception:
+        return 0.0
 
 def dhash(path, size=16):
     try:
@@ -174,7 +186,8 @@ def dhash(path, size=16):
         img  = cv2.resize(img, (size+1, size))
         diff = img[:, 1:] > img[:, :-1]
         return diff.flatten()
-    except: return None
+    except Exception:
+        return None
 
 def hamming_distance(a, b):
     return int(np.sum(a != b))
@@ -196,8 +209,10 @@ def deduplicate(folder):
                 drop = pi if sharpness(pj) > sharpness(pi) else pj
                 to_remove.add(drop)
     for p in to_remove:
-        try: os.remove(p)
-        except: pass
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     return len(to_remove)
 
 def safe_img(path):
@@ -226,18 +241,32 @@ def parse_urls(key):
             headers=headers, timeout=10)
         if r.status_code == 200:
             urls.update(re.findall(r'\["(https://[^"]+\.(?:jpg|jpeg|png|webp))"', r.text))
-    except: pass
+            urls.update(re.findall(r'"(https://[^"\\]+\.(?:jpg|jpeg|png|webp))"', r.text))
+    except RequestException as e:
+        print(f"parse_urls error for '{key}': {e}")
     return [u for u in urls if not is_blocked(u)]
 
 def download_one(link, folder):
     try:
         r = requests.get(link, stream=True, timeout=15)
         if r.status_code != 200: return None
+        content_len = r.headers.get('Content-Length')
+        if content_len and int(content_len) > MAX_DOWNLOAD_BYTES:
+            return None
         ext  = os.path.splitext(urllib.parse.urlparse(link).path)[1][:5].lower()
         ext  = ext if ext in ('.jpg','.jpeg','.png','.webp') else '.jpg'
         path = os.path.join(folder, rand_name(folder, ext))
+        total = 0
         with open(path, 'wb') as f:
-            for chunk in r.iter_content(8192): f.write(chunk)
+            for chunk in r.iter_content(CHUNK_SIZE):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_DOWNLOAD_BYTES:
+                    f.close()
+                    os.remove(path)
+                    return None
+                f.write(chunk)
         if os.path.getsize(path) < 50*1024:
             os.remove(path); return None
         with warnings.catch_warnings():
@@ -246,7 +275,8 @@ def download_one(link, folder):
         if w < MIN_WIDTH or h < MIN_HEIGHT:
             os.remove(path); return None
         return path
-    except: return None
+    except (RequestException, OSError, ValueError):
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -281,7 +311,8 @@ def post_processing(folder, cb=None):
                 n = rand_name(folder, '.jpg')
                 safe_img(p).save(os.path.join(folder, n))
                 os.remove(p)
-            except: pass
+            except Exception:
+                pass
     imgs = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg','.jpeg'))]
     for i, f in enumerate(imgs):
         process_one(os.path.join(folder, f))
@@ -305,7 +336,8 @@ def _global_ocr_worker():
             if is_bad:
                 send_log(f"  ⚠ подозрительное: {os.path.basename(path_norm)}")
                 eel.mark_as_suspicious(page_idx, path_norm)()
-        except: pass
+        except Exception:
+            pass
         _ocr_queue.task_done()
 
 
@@ -318,8 +350,10 @@ def serve_image(filepath):
     return eel.btl.static_file(filepath, root=os.path.abspath(os.getcwd()))
 
 def send_log(msg, tag="normal"):
-    try: eel.add_log(msg, tag)()
-    except: pass
+    try:
+        eel.add_log(msg, tag)()
+    except Exception:
+        pass
 
 @eel.expose
 def get_blocked_domains():
@@ -364,7 +398,8 @@ def start_parsing():
 
 def _worker_parsing():
     global pages_data
-    pages_data = []
+    with pages_lock:
+        pages_data = []
     total = len(lines)
 
     for idx, line in enumerate(lines):
@@ -384,8 +419,10 @@ def _worker_parsing():
             all_links.extend(links)
 
         page_entry = {"folder": folder, "query": label, "files": []}
-        pages_data.append(page_entry)
-        eel.update_pages_count(len(pages_data))()
+        with pages_lock:
+            pages_data.append(page_entry)
+            pages_count = len(pages_data)
+        eel.update_pages_count(pages_count)()
 
         done_count = [0]
         total_links = len(all_links)
@@ -428,8 +465,9 @@ def _worker_parsing():
 
 @eel.expose
 def get_page(index):
-    if 0 <= index < len(pages_data):
-        return pages_data[index]
+    with pages_lock:
+        if 0 <= index < len(pages_data):
+            return deepcopy(pages_data[index])
     return None
 
 @eel.expose
@@ -442,13 +480,16 @@ def _worker_apply(marked_files):
     for path in marked_files:
         try:
             os.remove(os.path.normpath(path))
-            for pg in pages_data:
-                if path in pg["files"]:
-                    pg["files"].remove(path)
+            with pages_lock:
+                for pg in pages_data:
+                    if path in pg["files"]:
+                        pg["files"].remove(path)
             send_log(f"🗑 {os.path.basename(path)}")
-        except: pass
+        except OSError:
+            pass
 
-    folders = list(dict.fromkeys(p["folder"] for p in pages_data))
+    with pages_lock:
+        folders = list(dict.fromkeys(p["folder"] for p in pages_data))
     send_log("\n🎨 Применяю боке...", "accent")
 
     for fi, folder in enumerate(folders):
@@ -460,9 +501,10 @@ def _worker_apply(marked_files):
             for f in os.listdir(folder)
             if f.lower().endswith(('.jpg','.jpeg'))
         )
-        for pg in pages_data:
-            if pg["folder"] == folder:
-                pg["files"] = [p for p in pg["files"] if p in actual]
+        with pages_lock:
+            for pg in pages_data:
+                if pg["folder"] == folder:
+                    pg["files"] = [p for p in pg["files"] if p in actual]
 
         eel.update_overall_progress(fi, len(folders))()
         send_log(f"  папка {folder}...")
